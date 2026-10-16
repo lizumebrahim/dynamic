@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Admin Portal - dynamic</title>
+    <link rel="stylesheet" href="https://pyscript.net/latest/pyscript.css" />
+    <script defer src="https://pyscript.net/latest/pyscript.js"></script>
+    <style>
+      body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; margin: 24px; }
+      .card { border: 1px solid #e3e3e3; padding: 16px; border-radius: 8px; margin-bottom: 16px; }
+      label { display:block; margin-top:8px }
+      input, textarea, select { width:100%; padding:8px; margin-top:4px; box-sizing: border-box }
+      button { padding:8px 12px; margin-right:8px }
+      pre { background:#f7f7f7; padding:12px; border-radius:6px; white-space:pre-wrap }
+    </style>
+  </head>
+  <body>
+    <h1>Admin Portal (PyScript)</h1>
+
+    <div class="card">
+      <strong>Important</strong>
+      <p>
+        This page uses your personal access token (PAT) in-memory to interact with the GitHub API. Create a token with the minimal scopes you need (for config file read/write use <code>repo</code>). Do not store tokens here permanently.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Authentication</h2>
+      <label>GitHub personal access token (session-only)</label>
+      <input id="token" type="password" placeholder="ghp_..." />
+      <label>Repository</label>
+      <input id="repo" value="lizumebrahim/dynamic" />
+      <div style="margin-top:8px">
+        <button id="btnRepoInfo">Get Repo Info</button>
+        <button id="btnGetConfig">Load admin-config.json</button>
+        <button id="btnSaveConfig">Save admin-config.json</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Admin config (admin-config.json)</h2>
+      <label>JSON config</label>
+      <textarea id="config" rows="8">{"maintenance": false, "message": ""}</textarea>
+      <div style="margin-top:8px">
+        <button id="btnSetDefaults">Set defaults</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Output / Logs</h2>
+      <pre id="output">Ready.</pre>
+    </div>
+
+    <py-script>
+from js import fetch, document, console
+from pyodide.ffi import to_js
+import json, base64, asyncio
+
+owner_repo_input = document.getElementById('repo')
+output_el = document.getElementById('output')
+
+OWNER = None
+REPO = None
+
+def set_output(txt):
+    output_el.textContent = txt
+
+async def api_get(path, token):
+    headers = {
+        'Authorization': f'token {token}',
+        'Accept': 'application/vnd.github.v3+json'
+    }
+    resp = await fetch(f'https://api.github.com{path}', to_js({'headers': headers}))
+    return resp
+
+async def get_repo_info(evt=None):
+    token = document.getElementById('token').value
+    repo_text = owner_repo_input.value.strip()
+    if not repo_text or '/' not in repo_text:
+        set_output('Repo must be in the form owner/repo')
+        return
+    owner, repo = repo_text.split('/',1)
+    try:
+        resp = await api_get(f'/repos/{owner}/{repo}', token)
+        if resp.status == 200:
+            info = await resp.json()
+            set_output(json.dumps(info, indent=2))
+        else:
+            text = await resp.text()
+            set_output(f'GET /repos failed: {resp.status}\n{text}')
+    except Exception as e:
+        set_output('Error: ' + str(e))
+
+async def load_config(evt=None):
+    token = document.getElementById('token').value
+    repo_text = owner_repo_input.value.strip()
+    if not repo_text or '/' not in repo_text:
+        set_output('Repo must be in the form owner/repo')
+        return
+    owner, repo = repo_text.split('/',1)
+    try:
+        resp = await api_get(f'/repos/{owner}/{repo}/contents/admin-config.json', token)
+        if resp.status == 200:
+            data = await resp.json()
+            content_b64 = data.get('content','')
+            # content may include newlines
+            content_b64 = ''.join(content_b64.splitlines())
+            raw = base64.b64decode(content_b64).decode('utf-8')
+            document.getElementById('config').value = raw
+            set_output('Loaded admin-config.json from repository (sha: ' + data.get('sha','') + ')')
+        elif resp.status == 404:
+            set_output('admin-config.json not found in repository. You can save to create it.')
+        else:
+            text = await resp.text()
+            set_output(f'GET contents failed: {resp.status}\n{text}')
+    except Exception as e:
+        set_output('Error: ' + str(e))
+
+async def save_config(evt=None):
+    token = document.getElementById('token').value
+    repo_text = owner_repo_input.value.strip()
+    if not repo_text or '/' not in repo_text:
+        set_output('Repo must be in the form owner/repo')
+        return
+    owner, repo = repo_text.split('/',1)
+    content_text = document.getElementById('config').value
+    try:
+        # First check if file exists to obtain sha
+        resp_check = await api_get(f'/repos/{owner}/{repo}/contents/admin-config.json', token)
+        sha = None
+        if resp_check.status == 200:
+            data_check = await resp_check.json()
+            sha = data_check.get('sha')
+        # prepare body
+        content_b64 = base64.b64encode(content_text.encode('utf-8')).decode('ascii')
+        body = {
+            'message': 'Update admin-config.json via admin.html',
+            'content': content_b64,
+        }
+        if sha:
+            body['sha'] = sha
+        headers = {
+            'Authorization': f'token {token}',
+            'Accept': 'application/vnd.github.v3+json',
+            'Content-Type': 'application/json'
+        }
+        resp = await fetch(f'https://api.github.com/repos/{owner}/{repo}/contents/admin-config.json', to_js({
+            'method': 'PUT',
+            'headers': headers,
+            'body': json.dumps(body)
+        }))
+        if resp.status in (200,201):
+            data = await resp.json()
+            set_output('Saved admin-config.json to repo (commit: ' + data.get('commit',{}).get('sha','') + ')')
+        else:
+            text = await resp.text()
+            set_output(f'PUT contents failed: {resp.status}\n{text}')
+    except Exception as e:
+        set_output('Error: ' + str(e))
+
+
+# event wiring
+
+document.getElementById('btnRepoInfo').addEventListener('click', lambda ev: asyncio.ensure_future(get_repo_info(ev)))
+document.getElementById('btnGetConfig').addEventListener('click', lambda ev: asyncio.ensure_future(load_config(ev)))
+document.getElementById('btnSaveConfig').addEventListener('click', lambda ev: asyncio.ensure_future(save_config(ev)))
+
+def set_defaults(evt=None):
+    document.getElementById('config').value = json.dumps({"maintenance": False, "message": "Admin portal initialized."}, indent=2)
+    set_output('Defaults set in editor. Click Save to write to repo.')
+
+document.getElementById('btnSetDefaults').addEventListener('click', lambda ev: set_defaults(ev))
+
+    </py-script>
+
+  </body>
+</html>
